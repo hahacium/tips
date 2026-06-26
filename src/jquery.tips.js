@@ -189,7 +189,7 @@ if ( typeof Object.create !== 'function' ) {
         addToDom: function () {
 
              var _container = $('.jq-tips-wrap');
-              
+             
              if ( _container.length === 0 ) {
                 
                 _container = $('<div></div>',{
