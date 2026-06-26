@@ -121,10 +121,10 @@ if ( typeof Object.create !== 'function' ) {
 
             } else if ( typeof this.options.position === 'object' ) {
                 this._container.css({
-                    top : this.options.position.top ? this.options.position.top : 'auto',
-                    bottom : this.options.position.bottom ? this.options.position.bottom : 'auto',
-                    left : this.options.position.left ? this.options.position.left : 'auto',
-                    right : this.options.position.right ? this.options.position.right : 'auto'
+                    top : typeof this.options.position.top !== 'undefined' ? this.options.position.top : 'auto',
+                    bottom : typeof this.options.position.bottom !== 'undefined' ? this.options.position.bottom : 'auto',
+                    left : typeof this.options.position.left !== 'undefined' ? this.options.position.left : 'auto',
+                    right : typeof this.options.position.right !== 'undefined' ? this.options.position.right : 'auto'
                 });
             } else {
                 this._container.addClass( 'bottom-left' );
@@ -189,7 +189,7 @@ if ( typeof Object.create !== 'function' ) {
         addToDom: function () {
 
              var _container = $('.jq-tips-wrap');
-             
+              
              if ( _container.length === 0 ) {
                 
                 _container = $('<div></div>',{
