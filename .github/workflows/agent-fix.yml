@@ -1,0 +1,179 @@
+name: Agent fix labeled issues
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: agent-fix-labeled-issues
+  cancel-in-progress: false
+
+jobs:
+  fix_issue:
+    name: Fix one agent_fix issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Pick an issue labeled agent_fix
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          issue_json="$(gh issue list \
+            --state open \
+            --label agent_fix \
+            --limit 1 \
+            --json number,title,body,url \
+            --jq '.[0] // empty')"
+
+          if [[ -z "$issue_json" ]]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No open issues with the agent_fix label were found."
+            exit 0
+          fi
+
+          issue_number="$(jq -r '.number' <<< "$issue_json")"
+          issue_title="$(jq -r '.title' <<< "$issue_json")"
+          issue_body="$(jq -r '.body // ""' <<< "$issue_json")"
+          issue_url="$(jq -r '.url' <<< "$issue_json")"
+
+          safe_title="$(tr '[:upper:]' '[:lower:]' <<< "$issue_title" | tr -cs 'a-z0-9' '-' | sed -E 's/^-+|-+$//g' | cut -c1-48)"
+          if [[ -z "$safe_title" ]]; then
+            safe_title="issue"
+          fi
+
+          branch="agent-fix/issue-${issue_number}-${safe_title}"
+
+          {
+            echo "found=true"
+            echo "number=$issue_number"
+            echo "url=$issue_url"
+            echo "branch=$branch"
+            echo "title<<EOF_TITLE"
+            echo "$issue_title"
+            echo "EOF_TITLE"
+            echo "body<<EOF_BODY"
+            echo "$issue_body"
+            echo "EOF_BODY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stop if a fix PR already exists
+        if: steps.issue.outputs.found == 'true'
+        id: existing_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.issue.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          existing="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Open PR #$existing already exists for $BRANCH."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create repair branch
+        if: steps.issue.outputs.found == 'true' && steps.existing_pr.outputs.skip == 'false'
+        env:
+          BRANCH: ${{ steps.issue.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git switch -c "$BRANCH"
+
+      - name: Build Codex prompt
+        if: steps.issue.outputs.found == 'true' && steps.existing_pr.outputs.skip == 'false'
+        env:
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+          ISSUE_BODY: ${{ steps.issue.outputs.body }}
+        run: |
+          set -euo pipefail
+
+          cat .github/codex/prompts/agent-fix.md > codex-agent-fix-prompt.md
+          cat >> codex-agent-fix-prompt.md <<PROMPT
+
+          Fix GitHub issue #${ISSUE_NUMBER}.
+
+          Issue URL: ${ISSUE_URL}
+          Issue title: ${ISSUE_TITLE}
+
+          Issue body:
+          ${ISSUE_BODY}
+          PROMPT
+
+      - name: Run Codex repair agent
+        if: steps.issue.outputs.found == 'true' && steps.existing_pr.outputs.skip == 'false'
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: codex-agent-fix-prompt.md
+          sandbox: workspace-write
+          output-file: codex-output.md
+
+      - name: Commit changes
+        if: steps.issue.outputs.found == 'true' && steps.existing_pr.outputs.skip == 'false'
+        id: commit
+        env:
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+        run: |
+          set -euo pipefail
+
+          rm -f codex-agent-fix-prompt.md codex-output.md
+
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Codex did not produce repository changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix issue #${ISSUE_NUMBER} via agent"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request
+        if: steps.issue.outputs.found == 'true' && steps.existing_pr.outputs.skip == 'false' && steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.issue.outputs.branch }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
+          CODEX_FINAL_MESSAGE: ${{ steps.codex.outputs.final-message }}
+        run: |
+          set -euo pipefail
+
+          git push --set-upstream origin "$BRANCH"
+
+          pr_body="$(printf '%s\n\n%s\n\n%s\n\n%s\n%s\n' \
+            "Automated fix for #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
+            "Closes #${ISSUE_NUMBER}" \
+            "Issue: ${ISSUE_URL}" \
+            "## Agent summary" \
+            "${CODEX_FINAL_MESSAGE:-Codex completed without a final summary.}")"
+
+          gh pr create \
+            --title "Fix #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
+            --body "$pr_body" \
+            --head "$BRANCH"
